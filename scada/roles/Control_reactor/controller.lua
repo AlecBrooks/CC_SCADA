@@ -34,7 +34,7 @@ local function drawUI()
 
     if data.alarms then
       for k,v in pairs(data.alarms) do
-        if v then print("  ⚠ " .. k:upper()) end
+        if v then print("  [!] " .. k:upper()) end
       end
     end
 
