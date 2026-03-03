@@ -1,1 +1,1 @@
-reactor control
+print(reactor control)

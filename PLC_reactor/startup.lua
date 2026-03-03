@@ -1,1 +1,1 @@
-reactor PLC
+print("Reactor PLC")
