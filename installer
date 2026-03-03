@@ -1,42 +1,42 @@
--- installer.lua  (CC: Tweaked)
--- Downloads a role folder from a GitHub repo and installs/updates it locally.
- 
+-- installer.lua (CC: Tweaked)
+-- Installs CC-SCADA from GitHub:
+--  - always downloads /scada/lib
+--  - downloads chosen /scada/roles/<role>
+--  - sets /startup to run the role's startup.lua
+
 -------------------------
 -- CONFIG (EDIT THESE) --
 -------------------------
 local GITHUB_OWNER  = "AlecBrooks"
 local GITHUB_REPO   = "CC_SCADA"
 local GITHUB_BRANCH = "main"
- 
--- Folders (roles) in the repo root:
+
+-- Roles live under /scada/roles/<key>
 local ROLES = {
   { key = "PLC_reactor",     name = "Reactor PLC",        entry = "startup.lua" },
   { key = "Control_reactor", name = "Reactor Controller", entry = "startup.lua" },
 }
- 
--- Install destination:
--- If true, downloads into /<role_key>/...
--- If false, downloads into /... (root)
-local INSTALL_IN_ROLE_FOLDER = true
- 
--- If true, sets local "startup" file to run the role entrypoint.
+
+-- Install root in the CC computer filesystem
+local INSTALL_ROOT = "/scada"
+
+-- If true, sets local /startup to run the role entrypoint.
 local SET_STARTUP = true
- 
 -------------------------
 -- END CONFIG          --
 -------------------------
- 
+
 local function requireHttp()
   if not http then
     error("HTTP API not available. Enable HTTP in CC: Tweaked config (enableAPI_http).", 0)
   end
 end
- 
+
 local function ghApi(path)
   return ("https://api.github.com/repos/%s/%s/contents/%s?ref=%s")
     :format(GITHUB_OWNER, GITHUB_REPO, path, GITHUB_BRANCH)
 end
- 
+
 local function readAll(url, headers)
   local h = http.get(url, headers)
   if not h then return nil, "HTTP GET failed: " .. url end
@@ -44,81 +44,87 @@ local function readAll(url, headers)
   h.close()
   return body
 end
- 
+
 local function jsonDecode(s)
   local ok, obj = pcall(textutils.unserializeJSON, s)
   if not ok then return nil, "JSON decode failed" end
   return obj
 end
- 
+
 local function ensureDir(dir)
   if dir == "" or dir == "/" then return end
   if not fs.exists(dir) then fs.makeDir(dir) end
 end
- 
+
 local function writeFile(path, contents)
   ensureDir(fs.getDir(path))
   local f = fs.open(path, "w")
   f.write(contents)
   f.close()
 end
- 
+
 local function downloadFile(download_url, localPath)
-  local body, err = readAll(download_url, { ["User-Agent"] = "CC-Tweaked-Installer" })
+  local body, err = readAll(download_url, { ["User-Agent"] = "CC-SCADA-Installer" })
   if not body then return false, err end
   writeFile(localPath, body)
   return true
 end
- 
+
 local function listContents(repoPath)
   local url = ghApi(repoPath)
-  local body, err = readAll(url, { ["User-Agent"] = "CC-Tweaked-Installer" })
+  local body, err = readAll(url, { ["User-Agent"] = "CC-SCADA-Installer" })
   if not body then return nil, err end
   local obj, jerr = jsonDecode(body)
   if not obj then return nil, jerr end
   return obj
 end
- 
+
+local function recurseDownload(repoPath, localBase)
+  local items, err = listContents(repoPath)
+  if not items then error(err, 0) end
+
+  for _, item in ipairs(items) do
+    if item.type == "dir" then
+      local nextRepo = item.path
+      local nextLocal = fs.combine(localBase, item.name)
+      ensureDir(nextLocal)
+      recurseDownload(nextRepo, nextLocal)
+    elseif item.type == "file" then
+      local localPath = fs.combine(localBase, item.name)
+      write(string.format(" - %s ... ", localPath))
+      local ok, derr = downloadFile(item.download_url, localPath)
+      if ok then print("ok") else print("FAIL") error(derr, 0) end
+    end
+  end
+end
+
 local function installRole(roleKey)
   term.clear()
   term.setCursorPos(1,1)
-  print("Installing role: " .. roleKey)
+  print("Installing CC-SCADA role: " .. roleKey)
   print("Repo: " .. GITHUB_OWNER .. "/" .. GITHUB_REPO .. " (" .. GITHUB_BRANCH .. ")")
+  print("Install root: " .. INSTALL_ROOT)
   print("")
- 
-  local baseLocal = INSTALL_IN_ROLE_FOLDER and ("/" .. roleKey) or "/"
-  ensureDir(baseLocal)
- 
-  local function recurse(repoPath, localBase)
-    local items, err = listContents(repoPath)
-    if not items then error(err, 0) end
- 
-    for _, item in ipairs(items) do
-      if item.type == "dir" then
-        local nextRepo = item.path
-        local nextLocal = fs.combine(localBase, item.name)
-        ensureDir(nextLocal)
-        recurse(nextRepo, nextLocal)
-      elseif item.type == "file" then
-        local localPath = fs.combine(localBase, item.name)
-        write(string.format(" - %s ... ", localPath))
-        local ok, derr = downloadFile(item.download_url, localPath)
-        if ok then
-          print("ok")
-        else
-          print("FAIL")
-          error(derr, 0)
-        end
-      end
-    end
-  end
- 
-  recurse(roleKey, baseLocal)
- 
-  -- Remember role for "Update" button
+
+  -- Ensure base dirs
+  ensureDir(INSTALL_ROOT)
+  ensureDir(fs.combine(INSTALL_ROOT, "lib"))
+  ensureDir(fs.combine(INSTALL_ROOT, "roles"))
+  ensureDir(fs.combine(INSTALL_ROOT, "roles/" .. roleKey))
+
+  -- 1) Always install shared lib
+  print("[1/2] Installing shared library: /scada/lib")
+  recurseDownload("scada/lib", fs.combine(INSTALL_ROOT, "lib"))
+
+  -- 2) Install role
+  print("")
+  print("[2/2] Installing role: /scada/roles/" .. roleKey)
+  recurseDownload("scada/roles/" .. roleKey, fs.combine(INSTALL_ROOT, "roles/" .. roleKey))
+
+  -- Remember role for "Update"
   settings.set("installer.lastRole", roleKey)
   settings.save()
- 
+
   -- Set startup
   if SET_STARTUP then
     local entry = nil
@@ -126,43 +132,42 @@ local function installRole(roleKey)
       if r.key == roleKey then entry = r.entry end
     end
     if not entry then error("No entry configured for role " .. roleKey, 0) end
- 
-    local targetPath = INSTALL_IN_ROLE_FOLDER
-      and fs.combine("/" .. roleKey, entry)
-      or ("/" .. entry)
- 
-    -- Create /startup that runs the target file
+
+    local targetPath = fs.combine(INSTALL_ROOT, "roles/" .. roleKey .. "/" .. entry)
+
     local startupContents = ([[-- auto-generated by installer.lua
+term.clear()
+term.setCursorPos(1,1)
+print("Booting CC-SCADA: %s")
 shell.run(%q)
-]]):format(targetPath)
- 
+]]):format(roleKey, targetPath)
+
     writeFile("/startup", startupContents)
     print("")
     print("Startup configured to run: " .. targetPath)
   end
- 
+
   print("")
-  print("Done.")
-  print("Reboot recommended.")
+  print("Done. Reboot recommended.")
 end
- 
+
 local function menu()
   while true do
     term.clear()
     term.setCursorPos(1,1)
-    print("=== Reactor System Installer ===")
+    print("=== CC-SCADA Installer ===")
     print("Repo: " .. GITHUB_OWNER .. "/" .. GITHUB_REPO .. " (" .. GITHUB_BRANCH .. ")")
     print("")
- 
+
     local last = settings.get("installer.lastRole")
     for i, r in ipairs(ROLES) do
       print(("%d) Install: %s (%s)"):format(i, r.name, r.key))
     end
- 
+
     local updateIndex = #ROLES + 1
     local rebootIndex = #ROLES + 2
     local exitIndex   = #ROLES + 3
- 
+
     if last then
       print(("%d) Update: reinstall last role (%s)"):format(updateIndex, last))
     else
@@ -172,7 +177,7 @@ local function menu()
     print(("%d) Exit"):format(exitIndex))
     print("")
     write("Select: ")
- 
+
     local choice = tonumber(read())
     if choice and choice >= 1 and choice <= #ROLES then
       installRole(ROLES[choice].key)
@@ -195,7 +200,7 @@ local function menu()
     end
   end
 end
- 
+
 -- main
 requireHttp()
 settings.load()

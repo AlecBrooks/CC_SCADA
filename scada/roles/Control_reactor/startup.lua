@@ -1,0 +1,1 @@
+shell.run("/scada/roles/Control_reactor/controller.lua")
